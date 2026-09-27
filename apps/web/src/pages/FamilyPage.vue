@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import PasswordLinkButton from '../components/PasswordLinkButton.vue';
 import QRCode from 'qrcode';
 import { Copy, ShieldCheck, UserPlus, Users, X } from 'lucide-vue-next';
 import type { HouseholdRole, Invitation, Member, MemberGrant } from '@simcare/shared';
@@ -148,6 +149,7 @@ onMounted(refreshInvitations);
           >
         </div>
         <div v-if="admin && member.id !== state.session?.user.id" class="member-admin-actions">
+          <PasswordLinkButton :member="member" />
           <button
             v-if="systemAdmin && !member.systemRole"
             class="text-button"
@@ -220,12 +222,13 @@ onMounted(refreshInvitations);
         /><button class="button secondary" @click="copy(invitationLink)">
           <Copy :size="17" />复制邀请链接
         </button>
-        <p class="muted">一次性邀请 · 24 小时有效 · 加入后需批准设备</p>
+        <p class="muted">一次性邀请 · 24 小时有效 · 首次加入需管理员批准</p>
       </div>
       <form v-else class="form-stack" @submit.prevent="createInvitation">
         <label
           >成员角色<select v-model="invitationRole">
             <option value="member">普通成员</option>
+            <option v-if="systemAdmin" value="admin">家庭管理员</option>
           </select></label
         ><button class="button primary" :disabled="busy"><UserPlus :size="17" />生成邀请</button>
       </form></ModalDialog

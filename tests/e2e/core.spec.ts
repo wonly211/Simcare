@@ -23,6 +23,7 @@ async function login(page: Page): Promise<Session> {
   return api<Session>(page, '/auth/admin-recover', 'POST', {
     phone: '13800000000',
     initKey: 'e2e-only-not-a-production-secret',
+    password: 'e2e-password',
     deviceName: '测试管理员设备',
   });
 }
@@ -43,6 +44,8 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
   await page.getByLabel('手机号', { exact: true }).fill('13800000000');
   await page.getByLabel('姓名或昵称').fill('测试管理员');
   await page.getByLabel('初始化密钥').fill('e2e-only-not-a-production-secret');
+  await page.getByLabel('设置密码（8～64 个字符）', { exact: true }).fill('e2e-password');
+  await page.getByLabel('再次输入密码', { exact: true }).fill('e2e-password');
   await page.getByRole('button', { name: '建立家庭', exact: true }).click();
   await expect(page.getByText('测试管理员').first()).toBeVisible();
   const admin = await api<Session>(page, '/auth/session');
@@ -80,7 +83,9 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
   await memberPage.getByLabel('手机号', { exact: true }).fill('13800000001');
   await memberPage.getByLabel('姓名或昵称').fill('测试成员');
   await memberPage.getByLabel('设备名称').fill('家人的手机');
-  await memberPage.getByRole('button', { name: '申请登录', exact: true }).click();
+  await memberPage.getByLabel('设置密码（8～64 个字符）', { exact: true }).fill('e2e-password');
+  await memberPage.getByLabel('再次输入密码', { exact: true }).fill('e2e-password');
+  await memberPage.getByRole('button', { name: '申请加入家庭', exact: true }).click();
   await expect(memberPage.getByRole('heading', { name: '等待管理员批准' })).toBeVisible();
   await page.goto('/#/settings');
   await expect(page.getByText('家人的手机', { exact: false })).toBeVisible();
@@ -250,21 +255,35 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
   await page.goto('/#/settings');
   await expect(page.getByRole('heading', { name: '已登录设备' })).toBeVisible();
   await page.screenshot({ path: '.artifacts/mobile-devices.png', fullPage: true });
+  await page.getByRole('button', { name: '家庭成员', exact: true }).click();
+  await page.getByRole('button', { name: '邀请成员', exact: true }).click();
+  await page.getByLabel('成员角色').selectOption('admin');
+  await page.getByRole('button', { name: '生成邀请', exact: true }).click();
+  await expect(page.getByLabel('邀请链接')).toBeVisible();
+  await page.getByRole('button', { name: '关闭', exact: true }).click();
+  await page.goto('/#/settings');
+
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   const pcContext = await browser.newContext();
   const pcPage = await pcContext.newPage();
-  await pcPage.goto('/');
-  await pcPage.getByLabel('手机号', { exact: true }).fill('13800000001');
-  await pcPage.getByLabel('设备名称').fill('家人的电脑');
-  await pcPage.getByRole('button', { name: '申请登录', exact: true }).click();
-  await expect(pcPage.getByRole('heading', { name: '等待管理员批准' })).toBeVisible();
-  await page.getByRole('button', { name: '刷新', exact: true }).click();
-  await page.getByRole('button', { name: '批准', exact: true }).click();
+  const setup = await api<{ token: string }>(page, '/auth/password-links', 'POST', {
+    userId: member.user.id,
+  });
+  await pcPage.goto('/#set-password=' + setup.token);
+  await expect(pcPage.getByRole('heading', { name: '设置登录密码', exact: true })).toBeVisible();
+  expect(pcPage.url()).not.toContain(setup.token);
+  await pcPage.getByLabel('设置密码（8～64 个字符）', { exact: true }).fill('member-new-password');
+  await pcPage.getByLabel('再次输入密码', { exact: true }).fill('member-new-password');
+  await pcPage.getByRole('button', { name: '设置密码并登录', exact: true }).click();
   await expect(pcPage.getByText('测试成员').first()).toBeVisible();
   await pcPage.goto('/#/settings');
   await pcPage.getByRole('button', { name: '移除', exact: true }).click();
   await pcPage.getByRole('button', { name: '确认移除', exact: true }).click();
   await expect(pcPage.getByRole('heading', { name: '手机号登录' })).toBeVisible();
+  await pcPage.getByLabel('手机号', { exact: true }).fill('13800000001');
+  await pcPage.getByLabel('登录密码', { exact: true }).fill('member-new-password');
+  await pcPage.getByRole('button', { name: '登录', exact: true }).click();
+  await expect(pcPage.getByText('测试成员').first()).toBeVisible();
   await pcContext.close();
   await page.goto('/#/settings');
   await page.getByRole('button', { name: '特大', exact: true }).click();
@@ -370,6 +389,15 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
   await page.getByRole('button', { name: '大字', exact: true }).click();
   await page.goto('/#/overview');
   await page.screenshot({ path: '.artifacts/elder-home.png', fullPage: true });
+  await page.goto('/#/settings');
+  await page.getByRole('button', { name: '修改登录密码', exact: true }).click();
+  await page.getByLabel('当前密码', { exact: true }).fill('e2e-password');
+  await page.getByLabel('新密码（8～64 个字符）', { exact: true }).fill('changed-e2e-password');
+  await page.getByLabel('再次输入新密码', { exact: true }).fill('changed-e2e-password');
+  await page.getByRole('button', { name: '保存密码', exact: true }).click();
+  await expect(
+    page.getByText('密码已保存，其他设备需要使用新密码登录', { exact: true }),
+  ).toBeVisible();
   expect(pageErrors).toEqual([]);
 
   await memberContext.close();

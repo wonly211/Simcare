@@ -73,6 +73,9 @@ members.patch('/:id', async (context) => {
       statements.push(
         db.prepare('DELETE FROM sessions WHERE user_id=?').bind(target.id),
         db
+          .prepare('DELETE FROM password_links WHERE user_id=? OR issuer_id=?')
+          .bind(target.id, target.id),
+        db
           .prepare('UPDATE invitations SET revoked_at=? WHERE created_by=?')
           .bind(beijingNow(), target.id),
         db
@@ -171,9 +174,11 @@ invitations.get('/', async (context) => {
 invitations.post('/', async (context) => {
   const actor = admin(context);
   const { role } = z
-    .object({ role: z.literal('member').default('member') })
+    .object({ role: z.enum(['member', 'admin']).default('member') })
     .parse(await context.req.json());
 
+  if (role === 'admin') admin(context, true);
+  await requireFresh(context);
   const invitation = {
     id: crypto.randomUUID(),
     role,
@@ -184,7 +189,7 @@ invitations.post('/', async (context) => {
   const value = token();
   const db = context.env.DB;
   await atomic(db, [
-    adminCheck(db, actor.id),
+    adminCheck(db, actor.id, role === 'admin'),
     db
       .prepare(
         'INSERT INTO invitations(id,token_hash,role,created_by,expires_at) VALUES (?,?,?,?,?)',

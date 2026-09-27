@@ -3,6 +3,7 @@ import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import type { Device, LoginRequest } from '@simcare/shared';
 import { state, syncNow, logoutLocal } from '../sync';
 import { api, displayTime, errorMessage, notify } from '../state/client';
+import PasswordSettings from '../components/PasswordSettings.vue';
 import UpdateNotice from '../components/UpdateNotice.vue';
 import { useUpdateGuard } from '../update/safety';
 import ModalDialog from '../components/ModalDialog.vue';
@@ -50,7 +51,7 @@ async function decide(request: LoginRequest, approve: boolean) {
     await api(`/auth/requests/${request.id}/decision`, 'POST', { approve });
     await load();
     await syncNow();
-    notify(approve ? '已批准设备登录' : '已拒绝申请');
+    notify(approve ? '已批准加入家庭' : '已拒绝申请');
   } catch (reason) {
     notify(errorMessage(reason), 'error');
   } finally {
@@ -81,7 +82,7 @@ onBeforeUnmount(() => {
 <template>
   <section class="page-section settings-page">
     <div class="section-heading"><h1>我的账户</h1></div>
-    <UpdateNotice settings />
+    <UpdateNotice settings /><PasswordSettings />
     <section class="settings-section">
       <h2>个人资料</h2>
       <p>手机号：{{ state.session?.user.phone }}</p>
@@ -101,17 +102,17 @@ onBeforeUnmount(() => {
     <section v-if="admin" class="settings-section">
       <div class="section-heading compact">
         <h2>
-          登录申请<span v-if="requests.length"> · {{ requests.length }} 项待批准</span>
+          加入申请<span v-if="requests.length"> · {{ requests.length }} 项待批准</span>
         </h2>
         <button class="button secondary" :disabled="!online" @click="load">刷新</button>
       </div>
-      <p class="muted">请核对家人的手机号与设备名称，再批准登录。申请 10 分钟有效。</p>
+      <p class="muted">请核对家人的手机号与设备名称，再批准加入。申请 10 分钟有效。</p>
       <p v-if="!requests.length">暂无待批准申请</p>
       <article v-for="request in requests" :key="request.id" class="credential-row">
         <div>
           <strong>{{ request.nickname || request.phone }} · {{ request.phone }}</strong>
           <p>
-            {{ request.deviceName }} · {{ request.newMember ? '新成员' : '已有成员' }} ·
+            {{ request.deviceName }} · {{ request.role === 'admin' ? '家庭管理员' : '普通成员' }} ·
             {{ displayTime(request.expiresAt) }} 过期
           </p>
         </div>
@@ -140,7 +141,7 @@ onBeforeUnmount(() => {
       </article>
     </section>
     <ModalDialog v-if="removing" title="移除设备" @close="removing = null"
-      ><p>移除“{{ removing.name }}”后，该设备需要重新申请登录。</p>
+      ><p>移除“{{ removing.name }}”后，该设备需要使用手机号和密码重新登录。</p>
       <button class="button primary" :disabled="busy" @click="remove">确认移除</button></ModalDialog
     >
   </section>

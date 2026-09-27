@@ -90,7 +90,16 @@ export async function sessionData(db: D1Database, user: Member): Promise<Session
     )
     .first<{ epoch: string; id: string; name: string }>();
   if (!row) fail('NOT_INITIALIZED', '系统尚未初始化', 409);
-  return { user, household: { id: row!.id, name: row!.name }, epoch: row!.epoch };
+  const password = await db
+    .prepare('SELECT user_id FROM password_credentials WHERE user_id=?')
+    .bind(user.id)
+    .first();
+  return {
+    passwordSetupRequired: !password,
+    user,
+    household: { id: row!.id, name: row!.name },
+    epoch: row!.epoch,
+  };
 }
 export function admin(context: AppContext, systemOnly = false) {
   const actor = context.get('actor');
@@ -135,6 +144,13 @@ export function revisionBump(db: D1Database) {
   return db.prepare('UPDATE system_settings SET revision=revision+1 WHERE id=1');
 }
 export async function requireFresh(context: AppContext) {
-  // An approved active device authorizes sensitive operations; no Passkey re-authentication.
+  const password = await context.env.DB.prepare(
+    'SELECT user_id FROM password_credentials WHERE user_id=?',
+  )
+    .bind(context.get('actor').id)
+    .first();
+  if (!password) fail('PASSWORD_SETUP_REQUIRED', '请先在“我的”设置登录密码', 403);
+  if (Date.parse(context.get('verifiedAt')) < Date.now() - 15 * 60000)
+    fail('REAUTH_REQUIRED', '请再次输入登录密码以确认身份', 403);
   await atomic(context.env.DB, [activeCheck(context.env.DB, context.get('actor').id)]);
 }

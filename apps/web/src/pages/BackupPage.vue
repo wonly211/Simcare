@@ -353,6 +353,11 @@ async function restore() {
               <dd>{{ preview.summary.conflictCount }} 项</dd>
             </div>
           </dl>
+          <p v-if="restoreMode === 'overwrite'" role="note">
+            覆盖恢复不恢复登录密码。恢复后请用系统管理员手机号和当前 init_key
+            设置新密码，再帮助家人设置密码。
+          </p>
+          <p v-else>合并保留现有账户密码，新导入成员需要设置密码。恢复后所有设备需重新登录。</p>
           <details v-if="preview.conflicts.length">
             <summary>查看冲突</summary>
             <div v-for="(conflict, index) in preview.conflicts" :key="index" class="history-row">
@@ -374,7 +379,7 @@ async function restore() {
       ><p class="modal-description">
         {{
           restoreMode === 'overwrite'
-            ? '当前业务数据将被此备份替换。'
+            ? '当前业务数据将被此备份替换，登录密码将清除。系统管理员需使用手机号和当前 init_key 设置新密码，再帮助成员设置密码。'
             : '将导入可合并的数据，冲突项保留当前数据。'
         }}恢复完成后，所有设备需要重新登录。
       </p>

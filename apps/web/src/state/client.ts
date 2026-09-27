@@ -1,3 +1,4 @@
+import { requestReauth } from './password';
 import { protectedOperation } from '../update/safety';
 import { computed, reactive, ref } from 'vue';
 import type { ApiResponse } from '@simcare/shared';
@@ -36,7 +37,12 @@ export function errorMessage(error: unknown): string {
   }
   return '操作未完成，请稍后重试';
 }
-export async function api<T>(path: string, method = 'GET', body?: unknown): Promise<T> {
+export async function api<T>(
+  path: string,
+  method = 'GET',
+  body?: unknown,
+  retried = false,
+): Promise<T> {
   return protectedOperation(async () => {
     const response = await fetch(`/api/v1${path}`, {
       method,
@@ -49,6 +55,10 @@ export async function api<T>(path: string, method = 'GET', body?: unknown): Prom
       throw new Error('服务暂不可用，请检查网络后重试');
     const envelope = (await response.json()) as ApiResponse<T>;
     if (!envelope.success) {
+      if (envelope.error.code === 'REAUTH_REQUIRED' && !retried) {
+        await requestReauth();
+        return api<T>(path, method, body, true);
+      }
       throw new Error(envelope.error.message);
     }
     if (!response.ok) throw new Error(`请求失败（${response.status}）`);

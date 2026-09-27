@@ -1,3 +1,9 @@
+import { putPassword } from '../src/passwords';
+const password = 'test-password';
+const fixturePassword =
+  'scrypt:16384:8:5:' +
+  '0'.repeat(64) +
+  ':f00cb58991c267673fe0147929fba6283889abcf097ef3d1b42c4eac6358138c';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { readFile, readdir } from 'node:fs/promises';
 import { Miniflare } from 'miniflare';
@@ -47,6 +53,8 @@ async function request<T = Record<string, unknown>>(
 }
 async function clear() {
   for (const table of [
+    'password_links',
+    'password_credentials',
     'login_requests',
     'auth_rate_limits',
     'restore_previews',
@@ -101,6 +109,7 @@ async function seed() {
       .prepare('INSERT INTO household_members(user_id,household_id,role,active)VALUES(?,?,?,1)')
       .bind(userId, householdId, ['system', 'admin'].includes(name) ? 'admin' : 'member')
       .run();
+    await putPassword(db, userId, fixturePassword).run();
     await db
       .prepare(
         'INSERT INTO sessions(token_hash,user_id,created_at,expires_at,verified_at)VALUES(?,?,?,?,?)',
@@ -577,7 +586,7 @@ describe('备份恢复', () => {
   });
 });
 
-describe('手机号与设备审批', () => {
+describe('手机号密码与加入审批', () => {
   type Ticket = { id: string; pollToken: string; expiresAt: string };
   const phones = {
     system: '13800000000',
@@ -586,9 +595,18 @@ describe('手机号与设备审批', () => {
     care: '13800000003',
   };
   const key = 'integration-test-init-key';
-  async function ticket(phone = phones.owner, extra: Record<string, string> = {}) {
+  async function ticket(phone = '13900000000', extra: Record<string, string> = {}) {
+    if (!extra.inviteToken)
+      extra = {
+        ...extra,
+        nickname: '新成员',
+        inviteToken: (
+          await request<{ token: string }>('POST', '/invitations', { role: 'member' }, 'admin')
+        ).body.data.token,
+      };
     const result = await request<Ticket>('POST', '/auth/requests', {
       phone,
+      password,
       deviceName: '测试手机',
       ...extra,
     });
@@ -605,7 +623,13 @@ describe('手机号与设备审批', () => {
   }
   it('初始化只成功一次，手机号规范化且 Cookie 保持 180 天', async () => {
     await clear();
-    const input = { phone: '+86 13800000000', nickname: '家人', initKey: key, deviceName: '手机' };
+    const input = {
+      phone: '+86 13800000000',
+      nickname: '家人',
+      initKey: key,
+      password,
+      deviceName: '手机',
+    };
     const results = await Promise.all([
       request<Session>('POST', '/auth/initialize', input),
       request<Session>('POST', '/auth/initialize', input),
@@ -628,8 +652,13 @@ describe('手机号与设备审批', () => {
         (await request<{ configured: boolean }>('GET', '/auth/status')).body.data.configured,
       ).toBe(false);
       expect(
-        (await request('POST', '/auth/admin-recover', { phone: phones.system, initKey: key })).body
-          .error?.code,
+        (
+          await request('POST', '/auth/admin-recover', {
+            phone: phones.system,
+            password,
+            initKey: key,
+          })
+        ).body.error?.code,
       ).toBe('SETUP_REQUIRED');
       env.init_key = 'new-key';
       env.INIT_KEY = previous;
@@ -652,10 +681,13 @@ describe('手机号与设备审批', () => {
     expect((await poll(item)).response.headers.get('set-cookie')).toBeNull();
   });
   it('家庭管理员不能批准管理员，系统管理员可批准', async () => {
-    const item = await ticket(phones.admin);
+    const invite = (
+      await request<{ token: string }>('POST', '/invitations', { role: 'admin' }, 'system')
+    ).body.data.token;
+    const item = await ticket('13900000000', { inviteToken: invite, nickname: '新管理员' });
     expect((await decision(item, 'admin')).response.status).toBe(403);
     expect((await decision(item, 'system')).response.status).toBe(200);
-    expect((await poll(item)).body.data.session.user.id).toBe(users.admin);
+    expect((await poll(item)).body.data.session.user.householdRole).toBe('admin');
   });
   it('审批者降级后不能领取旧批准', async () => {
     const item = await ticket();
@@ -674,7 +706,7 @@ describe('手机号与设备审批', () => {
   it('目标停用后不能领取旧批准', async () => {
     const item = await ticket();
     await decision(item);
-    await db.prepare('UPDATE users SET active=0 WHERE id=?').bind(users.owner).run();
+    await db.prepare("UPDATE users SET active=0 WHERE phone='13900000000'").run();
     expect((await poll(item)).response.status).toBe(409);
   });
   it('拒绝和过期的申请不建立会话', async () => {
@@ -733,16 +765,27 @@ describe('手机号与设备审批', () => {
   });
   it('系统管理员仅凭自己的手机号和正确 init_key 恢复', async () => {
     expect(
-      (await request('POST', '/auth/admin-recover', { phone: phones.owner, initKey: key })).response
-        .status,
+      (
+        await request('POST', '/auth/admin-recover', {
+          phone: phones.owner,
+          password,
+          initKey: key,
+        })
+      ).response.status,
     ).toBe(403);
     expect(
-      (await request('POST', '/auth/admin-recover', { phone: phones.system, initKey: 'wrong' }))
-        .response.status,
+      (
+        await request('POST', '/auth/admin-recover', {
+          phone: phones.system,
+          password,
+          initKey: 'wrong',
+        })
+      ).response.status,
     ).toBe(403);
     const result = await request<Session>('POST', '/auth/admin-recover', {
       phone: phones.system,
       initKey: key,
+      password,
     });
     expect(result.body.data.user.id).toBe(users.system);
     expect((await db.prepare('SELECT count(*) n FROM household').first<{ n: number }>())!.n).toBe(
@@ -780,7 +823,7 @@ describe('手机号与设备审批', () => {
       {
         method: 'POST',
         headers: { Origin: 'https://new.example', 'Content-Type': 'application/json' },
-        body: JSON.stringify({ phone: phones.system, initKey: key }),
+        body: JSON.stringify({ phone: phones.system, password, initKey: key }),
       },
       env,
     );
@@ -790,7 +833,7 @@ describe('手机号与设备审批', () => {
         await request(
           'POST',
           '/auth/admin-recover',
-          { phone: phones.system, initKey: key },
+          { phone: phones.system, password, initKey: key },
           undefined,
           'https://other.example',
         )
@@ -800,7 +843,14 @@ describe('手机号与设备审批', () => {
   it('恢复备份后使用当前 init_key 登录，备份不含旧凭据或审批', async () => {
     const backup = (await request<BackupData>('GET', '/backups/export', undefined, 'system')).body
       .data;
-    for (const name of ['credentials', 'recovery_codes', 'login_requests', 'sessions'])
+    for (const name of [
+      'password_credentials',
+      'password_links',
+      'credentials',
+      'recovery_codes',
+      'login_requests',
+      'sessions',
+    ])
       expect(backup.tables).not.toHaveProperty(name);
     const preview = (
       await request<{ previewId: string }>(
@@ -815,8 +865,253 @@ describe('手机号与设备审批', () => {
         .response.status,
     ).toBe(200);
     expect(
-      (await request('POST', '/auth/admin-recover', { phone: phones.system, initKey: key }))
-        .response.status,
+      (
+        await request('POST', '/auth/admin-recover', {
+          phone: phones.system,
+          password,
+          initKey: key,
+        })
+      ).response.status,
     ).toBe(200);
+  });
+});
+
+describe('统一密码账户', () => {
+  const phone = '13800000002',
+    newPassword = 'new-password-2026';
+  async function login(number = phone, pass = password) {
+    return request<Session>('POST', '/auth/login', { phone: number, password: pass });
+  }
+  async function byCookie(cookie: string, path = '/auth/session') {
+    const response = await app.request(
+      origin + '/api/v1' + path,
+      { headers: { Cookie: cookie.split(';')[0]! } },
+      env,
+    );
+    return { response, body: (await response.json()) as Result<Session> };
+  }
+  async function issue(actor: keyof typeof users = 'admin', userId: string = users.owner) {
+    return request<{ token: string }>('POST', '/auth/password-links', { userId }, actor);
+  }
+  async function consume(value: string) {
+    return request<Session>('POST', '/auth/password-links/consume', {
+      token: value,
+      password: newPassword,
+    });
+  }
+  it('所有角色以手机号密码登录，错误密码和停用账户不能登录', async () => {
+    for (const number of ['13800000000', '13800000001', phone])
+      expect((await login(number)).response.status).toBe(200);
+    expect((await login(phone, 'wrong-password')).response.status).toBe(401);
+    expect((await login('13911111111')).response.status).toBe(401);
+    await db.prepare('UPDATE users SET active=0 WHERE id=?').bind(users.owner).run();
+    expect((await login()).response.status).toBe(401);
+  });
+  it('旧设备申请与旧管理员恢复不能绕过密码', async () => {
+    expect((await request('POST', '/auth/requests', { phone })).body.error?.code).toBe(
+      'UPDATE_REQUIRED',
+    );
+    expect(
+      (
+        await request('POST', '/auth/admin-recover', {
+          phone: '13800000000',
+          initKey: env.INIT_KEY,
+        })
+      ).body.error?.code,
+    ).toBe('UPDATE_REQUIRED');
+    expect((await request('POST', '/auth/requests', { phone, password })).body.error?.code).toBe(
+      'ACCOUNT_EXISTS',
+    );
+  });
+  it('无密码的原会话可补设，两个并发设置只能成功一次', async () => {
+    await db.prepare('DELETE FROM password_credentials WHERE user_id=?').bind(users.owner).run();
+    const session = await request<Session>('GET', '/auth/session', undefined, 'owner');
+    expect(session.body.data.passwordSetupRequired).toBe(true);
+    const results = await Promise.all([
+      request('POST', '/auth/password/setup', { password: newPassword }, 'owner'),
+      request('POST', '/auth/password/setup', { password: 'other-password' }, 'owner'),
+    ]);
+    expect(results.filter((r) => r.response.status === 200)).toHaveLength(1);
+    expect((await request('GET', '/auth/session', undefined, 'owner')).response.status).toBe(401);
+    const cookie = results
+      .find((r) => r.response.status === 200)!
+      .response.headers.get('set-cookie')!;
+    expect((await byCookie(cookie)).body.data.passwordSetupRequired).toBe(false);
+  });
+  it('密码修改撤销旧会话与旧密码，并保持新会话', async () => {
+    expect(
+      (
+        await request(
+          'POST',
+          '/auth/password/change',
+          { currentPassword: 'wrong-password', password: newPassword },
+          'owner',
+        )
+      ).response.status,
+    ).toBe(403);
+    const changed = await request(
+      'POST',
+      '/auth/password/change',
+      { currentPassword: password, password: newPassword },
+      'owner',
+    );
+    expect(changed.response.status).toBe(200);
+    expect((await request('GET', '/auth/session', undefined, 'owner')).response.status).toBe(401);
+    expect((await byCookie(changed.response.headers.get('set-cookie')!)).response.status).toBe(200);
+    expect((await login()).response.status).toBe(401);
+    expect((await login(phone, newPassword)).response.status).toBe(200);
+  });
+  it('设置链接按角色限制；生成不撤销会话，最新链接覆盖旧链接且只能兑换一次', async () => {
+    expect((await issue('owner', users.care)).response.status).toBe(403);
+    expect((await issue('admin', users.system)).response.status).toBe(403);
+    expect((await issue('admin', users.admin)).response.status).toBe(403);
+    expect((await issue('system', users.admin)).response.status).toBe(200);
+    const first = (await issue()).body.data.token,
+      second = (await issue()).body.data.token;
+    expect((await request('GET', '/auth/session', undefined, 'owner')).response.status).toBe(200);
+    expect((await consume(first)).response.status).toBe(409);
+    const results = await Promise.all([consume(second), consume(second)]);
+    expect(results.map((r) => r.response.status).sort()).toEqual([200, 409]);
+    expect((await request('GET', '/auth/session', undefined, 'owner')).response.status).toBe(401);
+    expect((await login(phone, newPassword)).response.status).toBe(200);
+  });
+  it('设置链接兑换时重查期限、账户状态和签发者角色', async () => {
+    let value = (await issue()).body.data.token;
+    await db.prepare("UPDATE password_links SET expires_at='2000-01-01T00:00:00+08:00'").run();
+    expect((await consume(value)).response.status).toBe(409);
+    value = (await issue()).body.data.token;
+    await db
+      .prepare("UPDATE household_members SET role='member' WHERE user_id=?")
+      .bind(users.admin)
+      .run();
+    expect((await consume(value)).response.status).toBe(409);
+    expect((await login()).response.status).toBe(200);
+  });
+  it('密码重新验证刷新敏感操作许可，不能复用已撤销会话', async () => {
+    await db
+      .prepare("UPDATE sessions SET verified_at='2000-01-01T00:00:00+08:00' WHERE user_id=?")
+      .bind(users.system)
+      .run();
+    expect(
+      (await request('POST', '/invitations', { role: 'admin' }, 'system')).body.error?.code,
+    ).toBe('REAUTH_REQUIRED');
+    expect(
+      (await request('POST', '/auth/password/verify', { password }, 'system')).response.status,
+    ).toBe(200);
+    expect(
+      (await request('POST', '/invitations', { role: 'admin' }, 'system')).response.status,
+    ).toBe(200);
+    expect(
+      (await request('POST', '/invitations', { role: 'admin' }, 'admin')).response.status,
+    ).toBe(403);
+  });
+  it('账户限流不永久锁定账户', async () => {
+    for (let i = 0; i < 10; i++)
+      expect((await login(phone, 'wrong-password')).response.status).toBe(401);
+    expect((await login()).response.status).toBe(429);
+    await db.prepare('DELETE FROM auth_rate_limits').run();
+    expect((await login()).response.status).toBe(200);
+  });
+  it('系统管理员恢复必须设置密码，撤销旧会话且不改变身份', async () => {
+    const result = await request<Session>('POST', '/auth/admin-recover', {
+      phone: '13800000000',
+      initKey: env.INIT_KEY,
+      password: newPassword,
+    });
+    expect(result.response.status).toBe(200);
+    expect(result.body.data.user.id).toBe(users.system);
+    expect((await request('GET', '/auth/session', undefined, 'system')).response.status).toBe(401);
+    expect((await login('13800000000', newPassword)).response.status).toBe(200);
+  });
+  it('密码校验与重设并发时不能留下可用的旧密码会话', async () => {
+    const link = (await issue()).body.data.token;
+    const [old, changed] = await Promise.all([login(), consume(link)]);
+    expect(changed.response.status).toBe(200);
+    expect([200, 401, 409]).toContain(old.response.status);
+    if (old.response.status === 200)
+      expect((await byCookie(old.response.headers.get('set-cookie')!)).response.status).toBe(401);
+    expect((await login()).response.status).toBe(401);
+  });
+});
+
+describe('既有数据库升级', () => {
+  it('0004 保留旧成员、会话和健康数据，撤销旧申请并要求补设密码', async () => {
+    await push([operation()]);
+    const legacy = new Miniflare({
+      modules: true,
+      script: 'export default {fetch(){return new Response("test")}}',
+      compatibilityDate: '2026-07-22',
+      d1Databases: ['DB'],
+    });
+    try {
+      const old = (await legacy.getD1Database('DB')) as unknown as D1Database;
+      for (const file of ['0001_initial.sql', '0002_auth_safety.sql', '0003_phone_devices.sql']) {
+        const sql = await readFile('db/migrations/' + file, 'utf8');
+        for (const statement of sql
+          .split(';')
+          .map((s) => s.trim())
+          .filter(Boolean))
+          await old.prepare(statement).run();
+      }
+      await old.prepare('DELETE FROM system_settings').run();
+      for (const table of [
+        'household',
+        'users',
+        'household_members',
+        'system_settings',
+        'sessions',
+        'health_records',
+      ]) {
+        const rows = await db
+          .prepare('SELECT * FROM ' + table)
+          .all<Record<string, string | number | null>>();
+        for (const row of rows.results) {
+          const columns = Object.keys(row);
+          await old
+            .prepare(
+              'INSERT INTO ' +
+                table +
+                '(' +
+                columns.join(',') +
+                ') VALUES(' +
+                columns.map(() => '?').join(',') +
+                ')',
+            )
+            .bind(...columns.map((c) => row[c]!))
+            .run();
+        }
+      }
+      await old
+        .prepare(
+          "INSERT INTO login_requests(id,phone,nickname,device_name,poll_hash,user_id,status,created_at,expires_at) VALUES('old-request','13800000002','','old','old',?,'pending',?,?)",
+        )
+        .bind(users.owner, beijingNow(), beijingNow(new Date(Date.now() + 600000)))
+        .run();
+      const sql = await readFile('db/migrations/0004_password_accounts.sql', 'utf8');
+      for (const statement of sql
+        .split(';')
+        .map((s) => s.trim())
+        .filter(Boolean))
+        await old.prepare(statement).run();
+      expect(
+        (await old.prepare('SELECT COUNT(*) n FROM health_records').first<{ n: number }>())!.n,
+      ).toBe(1);
+      expect((await old.prepare('SELECT COUNT(*) n FROM sessions').first<{ n: number }>())!.n).toBe(
+        4,
+      );
+      expect(
+        (await old.prepare('SELECT status FROM login_requests').first<{ status: string }>())!
+          .status,
+      ).toBe('rejected');
+      const response = await app.request(
+        origin + '/api/v1/auth/session',
+        { headers: { Cookie: 'simcare_session=test-owner' } },
+        { ...env, DB: old },
+      );
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as Result<Session>).data.passwordSetupRequired).toBe(true);
+    } finally {
+      await legacy.dispose();
+    }
   });
 });

@@ -25,6 +25,7 @@ async function auth(page: Page) {
       data: {
         phone: '13800000000',
         ...(!initialized ? { nickname: '升级测试成员' } : {}),
+        password: 'upgrade-password',
         deviceName: '升级测试设备',
         initKey: 'upgrade-only-test-key',
       },

@@ -27,6 +27,7 @@ export interface Grant {
   grant: MemberGrant;
 }
 export interface Session {
+  passwordSetupRequired?: boolean;
   user: Member;
   household: { id: string; name: string };
   epoch: string;
@@ -266,6 +267,7 @@ export const phoneSchema = z
   .transform((value) => value.replace(/^\+86\s*/, '').replace(/[ -]/g, ''))
   .pipe(z.string().regex(/^1[3-9]\d{9}$/, '请输入中国大陆手机号'));
 export interface LoginRequest {
+  role: HouseholdRole;
   id: string;
   phone: string;
   nickname: string;

@@ -1,9 +1,19 @@
+import {
+  credential,
+  credentialCheck,
+  encodePassword,
+  passwordSchema,
+  putPassword,
+  verifyPassword,
+} from './passwords';
 import { Hono } from 'hono';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { z } from 'zod';
 import { beijingNow, phoneSchema } from '@simcare/shared';
 import {
   activeCheck,
+  adminCheck,
+  requireFresh,
   admin,
   atomic,
   check,
@@ -54,7 +64,7 @@ export async function authenticate(context: AppContext, optional = false) {
   const actor = session && (await getMember(context.env.DB, session.user_id));
   if (!actor?.active) {
     if (optional) return null;
-    return fail('UNAUTHENTICATED', '请申请设备登录，或由系统管理员恢复登录', 401);
+    return fail('UNAUTHENTICATED', '请使用手机号和密码登录', 401);
   }
   context.set('actor', actor);
   context.set('sessionHash', await hash(raw!));
@@ -91,6 +101,8 @@ async function verifyKey(context: AppContext, provided: string) {
 }
 type RequestRow = {
   id: string;
+  password_encoded: string | null;
+  role: 'admin' | 'member';
   phone: string;
   nickname: string;
   device_name: string;
@@ -108,6 +120,8 @@ function approverCheck(db: D1Database, target: string, approver: string) {
 }
 async function canApprove(context: AppContext, row: RequestRow) {
   const actor = admin(context);
+  if (row.role === 'admin') admin(context, true);
+  if (!row.password_encoded) fail('UPDATE_REQUIRED', '请更新应用后重新提交加入申请', 409);
   if (row.user_id) {
     const target = await getMember(context.env.DB, row.user_id);
     if (
@@ -124,10 +138,23 @@ export const auth = new Hono<AppEnv>();
 auth.use('*', async (context, next) => {
   if (
     context.req.method === 'POST' &&
-    ['/initialize', '/admin-recover', '/requests'].includes(
-      context.req.path.replace('/api/v1/auth', ''),
-    )
+    [
+      '/initialize',
+      '/admin-recover',
+      '/requests',
+      '/login',
+      '/password/setup',
+      '/password/change',
+      '/password/verify',
+      '/password-links/consume',
+    ].includes(context.req.path.replace('/api/v1/auth', ''))
   ) {
+    const path = context.req.path.replace('/api/v1/auth', '');
+    if (['/initialize', '/admin-recover', '/requests'].includes(path)) {
+      const body = await context.req.json<Record<string, unknown>>();
+      if (body.password === undefined)
+        fail('UPDATE_REQUIRED', '请更新简护后使用手机号和密码登录或重新申请加入', 409);
+    }
     const bucket = Math.floor(Date.now() / 60000);
     const key = await hash(
       `${context.req.header('CF-Connecting-IP') ?? 'local'}:${context.req.path}`,
@@ -158,6 +185,7 @@ auth.get('/session', async (context) => {
 auth.post('/initialize', async (context) => {
   const input = z
     .object({
+      password: passwordSchema,
       phone: phoneSchema,
       nickname: z.string().trim().min(1).max(80),
       initKey: z.string().min(1).max(1000),
@@ -171,6 +199,7 @@ auth.post('/initialize', async (context) => {
     household = crypto.randomUUID(),
     value = token(),
     now = beijingNow();
+  const encoded = await encodePassword(input.password);
   try {
     await atomic(db, [
       check(db, '(SELECT initialized FROM system_settings WHERE id=1)=0'),
@@ -192,6 +221,7 @@ auth.post('/initialize', async (context) => {
           'UPDATE system_settings SET initialized=1,household_id=?,epoch=?,revision=revision+1 WHERE id=1',
         )
         .bind(household, crypto.randomUUID()),
+      putPassword(db, userId, encoded),
       sessionStatement(db, await hash(value), userId, input.deviceName),
     ]);
   } catch {
@@ -202,7 +232,12 @@ auth.post('/initialize', async (context) => {
 });
 auth.post('/admin-recover', async (context) => {
   const input = z
-    .object({ phone: phoneSchema, initKey: z.string().min(1).max(1000), deviceName })
+    .object({
+      phone: phoneSchema,
+      initKey: z.string().min(1).max(1000),
+      password: passwordSchema,
+      deviceName,
+    })
     .strict()
     .parse(await context.req.json());
   await verifyKey(context, input.initKey);
@@ -215,6 +250,8 @@ auth.post('/admin-recover', async (context) => {
   const value = token();
   await atomic(db, [
     activeCheck(db, user!.id),
+    check(db, "EXISTS(SELECT 1 FROM users WHERE id=? AND system_role='system_admin')", [user!.id]),
+    ...resetStatements(db, user!.id, await encodePassword(input.password)),
     sessionStatement(db, await hash(value), user!.id, input.deviceName),
   ]);
   sessionCookie(context, value);
@@ -223,6 +260,7 @@ auth.post('/admin-recover', async (context) => {
 auth.post('/requests', async (context) => {
   const input = z
     .object({
+      password: passwordSchema,
       phone: phoneSchema,
       nickname: z.string().trim().min(1).max(80).optional(),
       inviteToken: z.string().max(200).optional(),
@@ -235,8 +273,8 @@ auth.post('/requests', async (context) => {
     .prepare('SELECT id FROM users WHERE phone=?')
     .bind(input.phone)
     .first<{ id: string }>();
-  if (existing && !(await getMember(db, existing.id))?.active)
-    fail('ACCOUNT_DISABLED', '账户已停用', 403);
+  if (existing) fail('ACCOUNT_EXISTS', '此手机号已注册，请使用密码登录或联系管理员设置密码', 409);
+  let role: 'admin' | 'member' = 'member';
   let invitationHash: string | null = null;
   if (!existing) {
     if (!input.inviteToken || !input.nickname)
@@ -244,20 +282,20 @@ auth.post('/requests', async (context) => {
     invitationHash = await hash(input.inviteToken!);
     const invite = await db
       .prepare(
-        "SELECT id FROM invitations WHERE token_hash=? AND role='member' AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?",
+        'SELECT role FROM invitations WHERE token_hash=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>?',
       )
       .bind(invitationHash, beijingNow())
-      .first();
+      .first<{ role: 'admin' | 'member' }>();
+    role = invite?.role ?? 'member';
     if (!invite) fail('INVITATION_INVALID', '邀请已失效', 400);
   }
-  if (existing && (await getMember(db, existing.id))?.systemRole)
-    fail('ADMIN_RECOVERY_REQUIRED', '系统管理员请使用手机号和 init_key 登录', 400);
+
   const id = crypto.randomUUID(),
     pollToken = token(),
     expiresAt = later(10);
   await db
     .prepare(
-      "INSERT INTO login_requests(id,phone,nickname,device_name,poll_hash,invitation_hash,user_id,status,created_at,expires_at) VALUES(?,?,?,?,?,?,?,'pending',?,?)",
+      "INSERT INTO login_requests(id,phone,nickname,device_name,poll_hash,invitation_hash,user_id,status,created_at,expires_at,password_encoded,role) VALUES(?,?,?,?,?,?,?,'pending',?,?,?,?)",
     )
     .bind(
       id,
@@ -269,6 +307,8 @@ auth.post('/requests', async (context) => {
       existing?.id ?? null,
       beijingNow(),
       expiresAt,
+      await encodePassword(input.password),
+      role,
     )
     .run();
   return ok(context, { id, pollToken, expiresAt });
@@ -279,13 +319,19 @@ auth.get('/requests', async (context) => {
   const result = await context.env.DB.prepare(
     `SELECT r.*, u.nickname AS member_nickname FROM login_requests r
      LEFT JOIN users u ON u.id=r.user_id LEFT JOIN household_members m ON m.user_id=r.user_id
-     WHERE r.status='pending' AND r.expires_at>? AND (r.user_id IS NULL OR (u.active=1 AND m.active=1 AND u.system_role IS NULL AND u.id<>? AND (?=1 OR m.role='member')))
+     WHERE r.status='pending' AND r.password_encoded IS NOT NULL AND (r.role='member' OR ?=1) AND r.expires_at>? AND (r.user_id IS NULL OR (u.active=1 AND m.active=1 AND u.system_role IS NULL AND u.id<>? AND (?=1 OR m.role='member')))
      ORDER BY r.created_at DESC LIMIT 100`,
   )
-    .bind(beijingNow(), actor.id, Number(actor.systemRole === 'system_admin'))
+    .bind(
+      Number(actor.systemRole === 'system_admin'),
+      beijingNow(),
+      actor.id,
+      Number(actor.systemRole === 'system_admin'),
+    )
     .all<RequestRow & { member_nickname: string | null }>();
   const items = result.results.map((row) => ({
     id: row.id,
+    role: row.role,
     phone: row.phone,
     nickname: row.member_nickname ?? row.nickname,
     deviceName: row.device_name,
@@ -297,6 +343,7 @@ auth.get('/requests', async (context) => {
 });
 auth.post('/requests/:id/decision', async (context) => {
   await authenticate(context);
+  await requireFresh(context);
   const { approve } = z
     .object({ approve: z.boolean() })
     .strict()
@@ -310,7 +357,7 @@ auth.post('/requests/:id/decision', async (context) => {
   const actor = await canApprove(context, row!);
   const now = beijingNow(),
     userId = row!.user_id ?? crypto.randomUUID();
-  const statements = [activeCheck(db, actor.id)];
+  const statements = [adminCheck(db, actor.id, row!.role === 'admin')];
   if (!row!.user_id) {
     statements.push(
       check(
@@ -323,9 +370,9 @@ auth.post('/requests/:id/decision', async (context) => {
       statements.push(
         db
           .prepare(
-            "UPDATE invitations SET used_at=? WHERE token_hash=? AND role='member' AND used_at IS NULL AND revoked_at IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM users u JOIN household_members m ON m.user_id=u.id WHERE u.id=invitations.created_by AND u.active=1 AND m.active=1 AND m.role='admin')",
+            "UPDATE invitations SET used_at=? WHERE token_hash=? AND role=? AND used_at IS NULL AND revoked_at IS NULL AND expires_at>? AND EXISTS(SELECT 1 FROM users u JOIN household_members m ON m.user_id=u.id WHERE u.id=invitations.created_by AND u.active=1 AND m.active=1 AND m.role='admin' AND (invitations.role='member' OR u.system_role='system_admin'))",
           )
-          .bind(now, row!.invitation_hash, now),
+          .bind(now, row!.invitation_hash, row!.role, now),
         check(db, 'changes()=1'),
         check(db, '(SELECT COUNT(*) FROM household_members WHERE active=1)<10'),
         db
@@ -335,9 +382,10 @@ auth.post('/requests/:id/decision', async (context) => {
           .bind(userId, row!.nickname, now, row!.phone),
         db
           .prepare(
-            "INSERT INTO household_members(user_id,household_id,role,active) SELECT ?,household_id,'member',1 FROM system_settings WHERE id=1",
+            'INSERT INTO household_members(user_id,household_id,role,active) SELECT ?,household_id,?,1 FROM system_settings WHERE id=1',
           )
-          .bind(userId),
+          .bind(userId, row!.role),
+        putPassword(db, userId, row!.password_encoded!),
       );
     }
   } else statements.push(approverCheck(db, userId, actor.id));
@@ -373,13 +421,18 @@ auth.post('/requests/:id/poll', async (context) => {
     .prepare('SELECT * FROM login_requests WHERE id=? AND poll_hash=?')
     .bind(context.req.param('id'), await hash(pollToken))
     .first<RequestRow>();
-  if (!row) fail('REQUEST_INVALID', '登录申请无效', 404);
+  if (!row) fail('REQUEST_INVALID', '加入申请无效', 404);
+  if (!row!.password_encoded) fail('UPDATE_REQUIRED', '请更新应用后重新提交加入申请', 409);
   if (Date.parse(row!.expires_at) <= Date.now()) return ok(context, { status: 'expired' });
   if (row!.status !== 'approved') return ok(context, { status: row!.status });
   const value = token();
   try {
     await atomic(db, [
       approverCheck(db, row!.user_id!, row!.approved_by!),
+      check(db, 'EXISTS(SELECT 1 FROM password_credentials WHERE user_id=? AND encoded=?)', [
+        row!.user_id!,
+        row!.password_encoded!,
+      ]),
       db
         .prepare(
           "UPDATE login_requests SET status='claimed' WHERE id=? AND status='approved' AND expires_at>?",
@@ -397,6 +450,193 @@ auth.post('/requests/:id/poll', async (context) => {
     session: await sessionData(db, (await getMember(db, row!.user_id!))!),
   });
 });
+
+function resetStatements(db: D1Database, userId: string, encoded: string) {
+  return [
+    putPassword(db, userId, encoded),
+    db.prepare('DELETE FROM sessions WHERE user_id=?').bind(userId),
+    db.prepare('DELETE FROM password_links WHERE user_id=?').bind(userId),
+    db
+      .prepare(
+        "UPDATE login_requests SET status='rejected' WHERE user_id=? AND status IN ('pending','approved')",
+      )
+      .bind(userId),
+  ];
+}
+async function accountLimit(context: AppContext, phone: string) {
+  const key = await hash('password-account:' + phone),
+    bucket = Math.floor(Date.now() / 60000);
+  const row = await context.env.DB.prepare(
+    'INSERT INTO auth_rate_limits(key_hash,bucket,count) VALUES(?,?,1) ON CONFLICT(key_hash,bucket) DO UPDATE SET count=count+1 RETURNING count',
+  )
+    .bind(key, bucket)
+    .first<{ count: number }>();
+  if ((row?.count ?? 0) > 10) fail('RATE_LIMITED', '尝试次数较多，请一分钟后重试', 429);
+}
+auth.post('/login', async (context) => {
+  const input = z
+    .object({ phone: phoneSchema, password: passwordSchema, deviceName })
+    .strict()
+    .parse(await context.req.json());
+  await accountLimit(context, input.phone);
+  const db = context.env.DB,
+    user = await db
+      .prepare('SELECT id FROM users WHERE phone=?')
+      .bind(input.phone)
+      .first<{ id: string }>();
+  const saved = user ? await credential(db, user.id) : null;
+  const valid = await verifyPassword(input.password, saved?.encoded);
+  const member = user ? await getMember(db, user.id) : null;
+  if (!valid || !member?.active || !saved)
+    fail('LOGIN_INVALID', '手机号或密码不正确；尚未设置密码请联系管理员', 401);
+  const value = token();
+  try {
+    await atomic(db, [
+      activeCheck(db, member!.id),
+      credentialCheck(db, member!.id, saved!.version),
+      sessionStatement(db, await hash(value), member!.id, input.deviceName),
+    ]);
+  } catch {
+    return fail('LOGIN_CHANGED', '密码或账户状态已变化，请使用当前密码重试', 409);
+  }
+  sessionCookie(context, value);
+  return ok(context, await sessionData(db, member!));
+});
+auth.post('/password/setup', async (context) => {
+  const actor = await authenticate(context),
+    db = context.env.DB;
+  const input = z
+    .object({ password: passwordSchema, deviceName })
+    .strict()
+    .parse(await context.req.json());
+  const value = token(),
+    encoded = await encodePassword(input.password);
+  try {
+    await atomic(db, [
+      activeCheck(db, actor!.id),
+      check(db, 'EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?)', [
+        context.get('sessionHash'),
+        beijingNow(),
+      ]),
+      check(db, 'NOT EXISTS(SELECT 1 FROM password_credentials WHERE user_id=?)', [actor!.id]),
+      ...resetStatements(db, actor!.id, encoded),
+      sessionStatement(db, await hash(value), actor!.id, input.deviceName),
+    ]);
+  } catch {
+    return fail('PASSWORD_CONFLICT', '密码或登录状态已变化，请重新登录', 409);
+  }
+  sessionCookie(context, value);
+  return ok(context, await sessionData(db, actor!));
+});
+auth.post('/password/change', async (context) => {
+  const actor = await authenticate(context),
+    db = context.env.DB;
+  const input = z
+    .object({ currentPassword: passwordSchema, password: passwordSchema, deviceName })
+    .strict()
+    .parse(await context.req.json());
+  const saved = await credential(db, actor!.id);
+  if (!saved || !(await verifyPassword(input.currentPassword, saved.encoded)))
+    fail('PASSWORD_INVALID', '当前密码不正确', 403);
+  const value = token(),
+    encoded = await encodePassword(input.password);
+  try {
+    await atomic(db, [
+      activeCheck(db, actor!.id),
+      check(db, 'EXISTS(SELECT 1 FROM sessions WHERE token_hash=? AND expires_at>?)', [
+        context.get('sessionHash'),
+        beijingNow(),
+      ]),
+      credentialCheck(db, actor!.id, saved!.version),
+      ...resetStatements(db, actor!.id, encoded),
+      sessionStatement(db, await hash(value), actor!.id, input.deviceName),
+    ]);
+  } catch {
+    return fail('PASSWORD_CONFLICT', '密码或登录状态已变化，请重新登录', 409);
+  }
+  sessionCookie(context, value);
+  return ok(context, await sessionData(db, actor!));
+});
+auth.post('/password/verify', async (context) => {
+  const actor = await authenticate(context),
+    db = context.env.DB;
+  const { password } = z
+    .object({ password: passwordSchema })
+    .strict()
+    .parse(await context.req.json());
+  const saved = await credential(db, actor!.id);
+  if (!saved || !(await verifyPassword(password, saved.encoded)))
+    fail('PASSWORD_INVALID', '密码不正确；尚未设置密码请先在“我的”设置', 403);
+  await atomic(db, [
+    activeCheck(db, actor!.id),
+    credentialCheck(db, actor!.id, saved!.version),
+    db
+      .prepare('UPDATE sessions SET verified_at=? WHERE token_hash=? AND expires_at>?')
+      .bind(beijingNow(), context.get('sessionHash'), beijingNow()),
+    check(db, 'changes()=1'),
+  ]);
+  return ok(context, { ok: true });
+});
+auth.post('/password-links', async (context) => {
+  await authenticate(context);
+  const actor = admin(context);
+  await requireFresh(context);
+  const { userId } = z
+    .object({ userId: z.string().uuid() })
+    .strict()
+    .parse(await context.req.json());
+  const db = context.env.DB,
+    target = await getMember(db, userId);
+  if (
+    !target?.active ||
+    target.id === actor.id ||
+    target.systemRole ||
+    (actor.systemRole !== 'system_admin' && target.householdRole !== 'member')
+  )
+    fail('FORBIDDEN', '无权为此成员设置密码', 403);
+  const value = token(),
+    expiresAt = later(30);
+  await atomic(db, [
+    approverCheck(db, userId, actor.id),
+    db
+      .prepare(
+        'INSERT INTO password_links(user_id,issuer_id,token_hash,expires_at) VALUES(?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET issuer_id=excluded.issuer_id,token_hash=excluded.token_hash,expires_at=excluded.expires_at',
+      )
+      .bind(userId, actor.id, await hash(value), expiresAt),
+  ]);
+  return ok(context, { token: value, expiresAt });
+});
+auth.post('/password-links/consume', async (context) => {
+  const input = z
+    .object({ token: z.string().min(32).max(200), password: passwordSchema, deviceName })
+    .strict()
+    .parse(await context.req.json());
+  const db = context.env.DB,
+    tokenHash = await hash(input.token);
+  const link = await db
+    .prepare('SELECT user_id,issuer_id FROM password_links WHERE token_hash=? AND expires_at>?')
+    .bind(tokenHash, beijingNow())
+    .first<{ user_id: string; issuer_id: string }>();
+  if (!link) fail('LINK_INVALID', '设置链接已失效，请联系管理员重新生成', 409);
+  const value = token(),
+    encoded = await encodePassword(input.password);
+  try {
+    await atomic(db, [
+      approverCheck(db, link!.user_id, link!.issuer_id),
+      db
+        .prepare('DELETE FROM password_links WHERE token_hash=? AND expires_at>?')
+        .bind(tokenHash, beijingNow()),
+      check(db, 'changes()=1'),
+      ...resetStatements(db, link!.user_id, encoded),
+      sessionStatement(db, await hash(value), link!.user_id, input.deviceName),
+    ]);
+  } catch {
+    return fail('LINK_INVALID', '设置链接或成员权限已变化，请联系管理员', 409);
+  }
+  sessionCookie(context, value);
+  return ok(context, await sessionData(db, (await getMember(db, link!.user_id))!));
+});
+
 auth.get('/devices', async (context) => {
   const actor = await authenticate(context);
   const result = await context.env.DB.prepare(

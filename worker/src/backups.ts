@@ -448,6 +448,7 @@ backups.post('/restore', async (context) => {
       .bind(crypto.randomUUID(), currentSnapshot, now),
   ];
   for (const table of [
+    'password_links',
     'login_requests',
     'sessions',
     'challenges',
@@ -460,6 +461,7 @@ backups.post('/restore', async (context) => {
     statements.push(db.prepare(`DELETE FROM ${table}`));
   if (preview!.mode === 'overwrite') {
     statements.push(
+      db.prepare('DELETE FROM password_credentials'),
       db.prepare('DELETE FROM credentials'),
       db.prepare('DELETE FROM recovery_codes'),
     );

@@ -2,6 +2,8 @@
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { LoaderCircle } from 'lucide-vue-next';
 import type { LoginTicket, Session } from '@simcare/shared';
+import PasswordField from '../components/PasswordField.vue';
+import { resetToken } from '../state/password';
 import TextSizeControl from '../components/TextSizeControl.vue';
 import { acceptSession } from '../sync';
 import { useUpdateGuard, updateSafety } from '../update/safety';
@@ -12,12 +14,20 @@ const initialized = ref<boolean | null>(null),
   nickname = ref(''),
   initKey = ref(''),
   deviceName = ref('我的设备');
+const password = ref(''),
+  confirmPassword = ref('');
+const settingPassword = computed(
+  () => !initialized.value || adminLogin.value || !!inviteToken || !!resetToken.value,
+);
 const adminLogin = ref(false),
   busy = ref(false),
   error = ref(''),
   ticket = ref<LoginTicket | null>(null);
 useUpdateGuard(
   () =>
+    !!resetToken.value ||
+    !!password.value ||
+    !!confirmPassword.value ||
     !!phone.value ||
     !!nickname.value ||
     !!initKey.value ||
@@ -27,13 +37,15 @@ useUpdateGuard(
 );
 const inviteToken = new URLSearchParams(location.search).get('invite') ?? undefined;
 const title = computed(() =>
-  initialized.value === false
-    ? '建立你的家庭记录'
-    : adminLogin.value
-      ? '系统管理员登录'
-      : inviteToken
-        ? '加入家庭'
-        : '手机号登录',
+  resetToken.value
+    ? '设置登录密码'
+    : initialized.value === false
+      ? '建立你的家庭记录'
+      : adminLogin.value
+        ? '系统管理员找回密码'
+        : inviteToken
+          ? '加入家庭'
+          : '手机号登录',
 );
 let timer: ReturnType<typeof setTimeout> | undefined;
 let disposed = false;
@@ -42,7 +54,11 @@ function cancel() {
   clearTimeout(timer);
 }
 async function finish(session: Session) {
-  history.replaceState(history.state, '', location.pathname + location.hash);
+  resetToken.value = '';
+  password.value = '';
+  confirmPassword.value = '';
+  initKey.value = '';
+  history.replaceState(history.state, '', location.pathname);
   await acceptSession(session);
 }
 async function poll() {
@@ -85,23 +101,37 @@ async function submit() {
   busy.value = true;
   error.value = '';
   try {
-    if (!initialized.value || adminLogin.value)
+    if (settingPassword.value && password.value !== confirmPassword.value)
+      throw new Error('两次输入的密码不一致');
+    const input = { password: password.value, deviceName: deviceName.value };
+    if (resetToken.value)
+      await finish(
+        await api<Session>('/auth/password-links/consume', 'POST', {
+          ...input,
+          token: resetToken.value,
+        }),
+      );
+    else if (!initialized.value || adminLogin.value)
       await finish(
         await api<Session>(initialized.value ? '/auth/admin-recover' : '/auth/initialize', 'POST', {
+          ...input,
           phone: phone.value,
           initKey: initKey.value,
-          deviceName: deviceName.value,
           ...(!initialized.value ? { nickname: nickname.value } : {}),
         }),
       );
-    else {
+    else if (inviteToken) {
       ticket.value = await api<LoginTicket>('/auth/requests', 'POST', {
+        ...input,
         phone: phone.value,
-        deviceName: deviceName.value,
-        ...(inviteToken ? { inviteToken, nickname: nickname.value } : {}),
+        inviteToken,
+        nickname: nickname.value,
       });
+      password.value = '';
+      confirmPassword.value = '';
       void poll();
-    }
+    } else
+      await finish(await api<Session>('/auth/login', 'POST', { ...input, phone: phone.value }));
   } catch (reason) {
     error.value = errorMessage(reason);
   } finally {
@@ -139,16 +169,16 @@ onBeforeUnmount(() => {
       <p v-if="error" class="error-message" role="alert">{{ error }}</p>
       <div v-if="ticket" class="form-stack">
         <h2>等待管理员批准</h2>
-        <p>请让管理员打开“我的 → 登录申请”，确认手机号 {{ phone }} 和设备名称。</p>
+        <p>请让管理员打开“我的 → 加入申请”，确认手机号 {{ phone }} 和设备名称。</p>
         <p>申请 10 分钟有效，请保持此页面打开。</p>
         <button class="button secondary" @click="cancel">返回</button>
       </div>
       <form v-else-if="initialized !== null" class="form-stack" @submit.prevent="submit">
-        <label
+        <label v-if="!resetToken"
           >手机号<input
             v-model="phone"
             type="tel"
-            autocomplete="tel"
+            :autocomplete="settingPassword ? 'tel' : 'username'"
             required
             placeholder="11 位手机号"
             maxlength="20"
@@ -163,7 +193,13 @@ onBeforeUnmount(() => {
             maxlength="80"
             placeholder="例如：妈妈的手机"
         /></label>
-        <label v-if="!initialized || adminLogin"
+        <PasswordField
+          v-model="password"
+          :label="settingPassword ? '设置密码（8～64 个字符）' : '登录密码'"
+          :autocomplete="settingPassword ? 'new-password' : 'current-password'"
+        />
+        <PasswordField v-if="settingPassword" v-model="confirmPassword" label="再次输入密码" />
+        <label v-if="(!initialized || adminLogin) && !resetToken"
           >初始化密钥<input
             v-model="initKey"
             type="password"
@@ -176,11 +212,19 @@ onBeforeUnmount(() => {
           :disabled="busy || ((!initialized || adminLogin) && !configured)"
         >
           <LoaderCircle v-if="busy" :size="18" />{{
-            !initialized ? '建立家庭' : adminLogin ? '登录' : '申请登录'
+            resetToken
+              ? '设置密码并登录'
+              : !initialized
+                ? '建立家庭'
+                : adminLogin
+                  ? '重设密码并登录'
+                  : inviteToken
+                    ? '申请加入家庭'
+                    : '登录'
           }}
         </button>
         <button
-          v-if="initialized"
+          v-if="initialized && !inviteToken && !resetToken"
           type="button"
           class="text-button"
           @click="
@@ -188,9 +232,28 @@ onBeforeUnmount(() => {
             error = '';
           "
         >
-          {{ adminLogin ? '返回成员登录' : '系统管理员登录' }}
+          {{ adminLogin ? '返回登录' : '忘记密码' }}
         </button>
-        <p class="muted">不收短信，需要家人批准一次。批准后，这台设备会保持登录。</p>
+        <button
+          v-if="resetToken"
+          type="button"
+          class="button secondary"
+          :disabled="busy"
+          @click="
+            resetToken = '';
+            password = '';
+            confirmPassword = '';
+            error = '';
+          "
+        >
+          取消设置
+        </button>
+        <p v-if="adminLogin" class="muted">
+          普通成员请联系家庭管理员获取密码设置链接；家庭管理员请联系系统管理员。以下密钥恢复仅供系统管理员使用。
+        </p>
+        <p class="muted">
+          新成员首次加入需批准；以后用手机号和密码登录，无需短信。此设备会长期保持登录。
+        </p>
       </form>
     </section>
   </main>

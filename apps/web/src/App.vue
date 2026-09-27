@@ -19,6 +19,8 @@ import {
 } from 'lucide-vue-next';
 import { initialize, state, syncNow, resolveConflict, logoutLocal } from './sync';
 import { api, clock, errorMessage, notice, notify } from './state/client';
+import PasswordConfirmation from './components/PasswordConfirmation.vue';
+import { resetToken } from './state/password';
 import AuthPage from './pages/AuthPage.vue';
 import ModalDialog from './components/ModalDialog.vue';
 import UpdateNotice from './components/UpdateNotice.vue';
@@ -124,13 +126,13 @@ onMounted(async () => {
 
 <template>
   <div :inert="updateSafety.locked">
-    <UpdateNotice />
+    <UpdateNotice /><PasswordConfirmation />
     <div v-if="loading" class="app-loading">
       <img class="brand-logo" src="/logo.png" alt="" width="48" height="48" /><strong
         >简护 | Simcare</strong
       ><LoaderCircle class="spin" :size="22" />
     </div>
-    <AuthPage v-else-if="!state.session" />
+    <AuthPage v-else-if="!state.session || resetToken" />
     <div v-else class="app-shell">
       <aside class="sidebar">
         <a class="brand" href="#" @click.prevent="navigate('overview')"
@@ -219,6 +221,14 @@ onMounted(async () => {
           </div>
         </header>
         <main ref="mainContent" class="main-content" tabindex="-1">
+          <div
+            v-if="state.session?.passwordSetupRequired && page !== 'settings'"
+            class="inline-banner"
+            role="status"
+          >
+            <span>请为账户设置登录密码，以后换设备可直接登录。</span
+            ><button class="button secondary" @click="navigate('settings')">前往设置密码</button>
+          </div>
           <div v-if="['overview', 'health', 'medication'].includes(page)" class="member-switch">
             <span class="member-context">当前查看</span>
             <span class="avatar small">{{
