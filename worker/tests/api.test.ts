@@ -4,7 +4,7 @@ const fixturePassword =
   'scrypt:16384:8:5:' +
   '0'.repeat(64) +
   ':f00cb58991c267673fe0147929fba6283889abcf097ef3d1b42c4eac6358138c';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFile, readdir } from 'node:fs/promises';
 import { Miniflare } from 'miniflare';
 import {
@@ -1006,11 +1006,17 @@ describe('统一密码账户', () => {
     ).toBe(403);
   });
   it('账户限流不永久锁定账户', async () => {
-    for (let i = 0; i < 10; i++)
-      expect((await login(phone, 'wrong-password')).response.status).toBe(401);
-    expect((await login()).response.status).toBe(429);
-    await db.prepare('DELETE FROM auth_rate_limits').run();
-    expect((await login()).response.status).toBe(200);
+    const start = Math.floor(Date.now() / 60000) * 60000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(start + 59000);
+    try {
+      for (let i = 0; i < 10; i++)
+        expect((await login(phone, 'wrong-password')).response.status).toBe(401);
+      expect((await login()).response.status).toBe(429);
+      clock.mockReturnValue(start + 60000);
+      expect((await login()).response.status).toBe(200);
+    } finally {
+      clock.mockRestore();
+    }
   });
   it('系统管理员恢复必须设置密码，撤销旧会话且不改变身份', async () => {
     const result = await request<Session>('POST', '/auth/admin-recover', {
