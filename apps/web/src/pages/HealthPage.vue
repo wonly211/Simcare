@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
+import { groupHealthRecords, type HealthGroup } from '@simcare/shared';
 import { Activity, CalendarDays, ChartNoAxesCombined, List, Plus } from 'lucide-vue-next';
 import {
   beijingDate,
   canCreateHealth,
   canEditOwned,
   canViewHealth,
-  labels,
   type HealthRecord,
   type Revision,
 } from '@simcare/shared';
@@ -62,6 +62,7 @@ const records = computed(() =>
     )
     .sort((left, right) => right.measuredAt.localeCompare(left.measuredAt)),
 );
+const groupedRecords = computed<HealthGroup[]>(() => groupHealthRecords(records.value));
 const ownerName = (id: string) =>
   state.snapshot?.members.find((member) => member.id === id)?.nickname ?? '成员';
 function openForm(record?: HealthRecord) {
@@ -151,6 +152,7 @@ async function confirmAction() {
             <option value="temperature">体温 · °C</option>
           </select>
         </div>
+        <p class="muted">趋势按同一时段的平均值展示，原始测量保留在记录列表中。</p>
         <TrendChart :records="records" :metric="metric" />
       </div>
       <div v-else-if="!records.length" class="empty-state">
@@ -165,41 +167,50 @@ async function confirmAction() {
           <Plus :size="16" />记录第一次测量
         </button>
       </div>
-      <div v-else class="record-list">
-        <article v-for="record in records" :key="record.id" class="record-row">
-          <div class="record-date">
-            <strong>{{ record.measuredAt.slice(0, 10) }}</strong
-            ><span>{{ record.measuredAt.slice(11, 16) }}</span>
+      <div v-else class="record-list health-groups">
+        <section v-for="group in groupedRecords" :key="group.id" class="health-group">
+          <div class="health-group-heading">
+            <strong>{{ group.dateLabel }}</strong>
+            <span
+              >{{ group.timeLabel }} · {{ group.records.length }}次测量{{
+                group.records.length > 1 ? ' · 平均值' : ''
+              }}</span
+            >
           </div>
-          <div class="record-values">
-            <div v-if="record.systolic !== null" class="record-reading">
-              <strong
-                >{{ record.systolic }}<span class="reading-slash">/</span
-                >{{ record.diastolic }}</strong
-              ><span>血压 mmHg</span>
+          <article class="record-row grouped-record-row">
+            <div class="record-values">
+              <div class="record-reading">
+                <strong
+                  >{{ group.average.systolic ?? '—' }}<span class="reading-slash">/</span
+                  >{{ group.average.diastolic ?? '—' }}</strong
+                ><span>血压 mmHg</span>
+              </div>
+              <div class="record-reading">
+                <strong>{{ group.average.pulse ?? '—' }}</strong
+                ><span>心率 次/分</span>
+              </div>
+              <div class="record-reading">
+                <strong>{{ group.average.oxygen ?? '—' }}</strong
+                ><span>血氧 %</span>
+              </div>
             </div>
-            <div v-if="record.pulse !== null" class="record-reading">
-              <strong>{{ record.pulse }}</strong
-              ><span>心率 次/分</span>
-            </div>
-            <div v-if="record.oxygen !== null" class="record-reading">
-              <strong>{{ record.oxygen }}</strong
-              ><span>血氧 %</span>
-            </div>
-            <div v-if="record.temperature !== null" class="record-reading">
-              <strong>{{ record.temperature }}</strong
-              ><span>体温 °C</span>
-            </div>
-          </div>
-          <div class="record-meta">
-            <span>{{ labels.posture[record.posture] }} · {{ labels.arm[record.arm] }}</span
-            ><span>{{ ownerName(record.recordedBy) }} 录入</span>
-            <p v-if="record.note">{{ record.note }}</p>
-          </div>
-          <button class="button secondary" @click="detail = record">查看记录详情</button>
-        </article>
+            <p v-if="group.records.some((record) => record.note)" class="health-group-note">
+              {{ group.records.find((record) => record.note)?.note }}
+            </p>
+            <details class="health-group-details">
+              <summary>查看原始测量</summary>
+              <div v-for="record in group.records" :key="record.id" class="raw-health-row">
+                <span>{{ record.measuredAt.slice(11, 16) }}</span>
+                <span>{{ record.systolic ?? '—' }}/{{ record.diastolic ?? '—' }}</span>
+                <span>心率 {{ record.pulse ?? '—' }}</span>
+                <span>血氧 {{ record.oxygen ?? '—' }}</span>
+                <button class="text-button" @click="detail = record">详情</button>
+              </div>
+            </details>
+          </article>
+        </section>
       </div>
-      <p class="page-footnote">{{ records.length }} 条记录 · 北京时间 GMT+8</p>
+      <p class="page-footnote">{{ records.length }} 条原始记录 · 北京时间 GMT+8</p>
     </template>
     <ModalDialog v-if="detail" title="测量记录详情" @close="detail = undefined"
       ><RecordDetails :record="detail" />

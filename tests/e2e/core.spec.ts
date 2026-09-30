@@ -155,6 +155,7 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
   await page.getByLabel('备注', { exact: true }).fill('离线持久化测试');
   await page.getByRole('button', { name: '保存记录', exact: true }).click();
   await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.goto('/#/health');
   await expect(page.getByText('离线持久化测试', { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByText('测试管理员').first()).toBeVisible();
@@ -165,6 +166,8 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
       timeout: 20000,
     })
     .toBe(2);
+  await page.screenshot({ path: '.artifacts/desktop-health.png', fullPage: true });
+  await page.goto('/#/overview');
   const backup = await api(page, '/backups/export');
   const preview = await api<{ previewId: string }>(page, '/backups/preview', 'POST', {
     backup,
@@ -330,10 +333,12 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
     .click();
   await page.goto('/#/health');
   await expect(page.locator('main')).toBeFocused();
+  await page.screenshot({ path: '.artifacts/mobile-health.png', fullPage: true });
   await page.getByRole('button', { name: '趋势', exact: true }).click();
-  await page.getByText('查看同范围测量数据', { exact: true }).click();
+  await page.getByText('查看同范围平均数据', { exact: true }).click();
   await expect(page.locator('.trend-data')).toContainText('mmHg');
   await expect(page.locator('.trend-data li').first()).toBeVisible();
+  await page.screenshot({ path: '.artifacts/mobile-trend.png', fullPage: true });
   await page.goto('/#/medication');
   await page
     .locator('.dose-row')
@@ -389,6 +394,49 @@ test('手机号初始化与审批、权限、健康与用药、离线同步、�
   await page.getByRole('button', { name: '大字', exact: true }).click();
   await page.goto('/#/overview');
   await page.screenshot({ path: '.artifacts/elder-home.png', fullPage: true });
+  await page.goto('/#/settings');
+  // Verify rendered averages without rewriting either source measurement.
+  const groupingSnapshot = await api<SyncSnapshot>(page, '/sync/pull');
+  const groupingIds: string[] = [crypto.randomUUID(), crypto.randomUUID()];
+  const groupingOperations: SyncOperation[] = groupingIds.map((recordId, index) => ({
+    operationId: crypto.randomUUID(),
+    epoch: groupingSnapshot.epoch,
+    resource: 'health',
+    recordId,
+    baseVersion: 0,
+    action: 'upsert',
+    data: {
+      ...input,
+      ownerId: admin.user.id,
+      measuredAt: '2026-09-20T08:' + (index ? '10' : '00') + ':00+08:00',
+      systolic: 120 + index,
+      diastolic: 80 + index,
+      pulse: 70 + index,
+      oxygen: 97 + index,
+      note: '平均展示测试',
+    },
+  }));
+  for (const operation of groupingOperations)
+    await api(page, '/sync/push', 'POST', { operations: [operation] });
+  await page.goto('/#/health');
+  await page.reload();
+  await page.getByLabel('开始日期', { exact: true }).fill('2026-09-20');
+  await page.getByLabel('结束日期', { exact: true }).fill('2026-09-20');
+  const averageGroup = page.locator('.health-group');
+  await expect(averageGroup).toHaveCount(1);
+  await expect(averageGroup).toContainText('08:00–08:10 · 2次测量 · 平均值');
+  await expect(averageGroup.locator('.record-reading strong')).toHaveText(['121/81', '71', '98']);
+  await averageGroup.getByText('查看原始测量', { exact: true }).click();
+  await expect(averageGroup.locator('.raw-health-row')).toHaveCount(2);
+  await page.screenshot({ path: '.artifacts/mobile-health-average.png', fullPage: true });
+  await page.getByRole('button', { name: '趋势', exact: true }).click();
+  await page.getByText('查看同范围平均数据', { exact: true }).click();
+  await expect(page.locator('.trend-data li')).toHaveCount(1);
+  await expect(page.locator('.trend-data li')).toContainText('121 / 81');
+  const unchanged = (await api<SyncSnapshot>(page, '/sync/pull')).healthRecords.filter((record) =>
+    groupingIds.includes(record.id),
+  );
+  expect(unchanged.map((record) => record.systolic).sort()).toEqual([120, 121]);
   await page.goto('/#/settings');
   await page.getByRole('button', { name: '修改登录密码', exact: true }).click();
   await page.getByLabel('当前密码', { exact: true }).fill('e2e-password');

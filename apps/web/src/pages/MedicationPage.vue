@@ -51,22 +51,26 @@ const writableMembers = computed(() =>
 );
 const canEdit = computed(() => !!state.session && canEditOwned(state.session.user, props.ownerId));
 const groups = computed(() => {
-  const result: { label: string; icon: typeof Sun; doses: typeof doses.value }[] = [];
+  const result: { label: string; icon: typeof Sun; sortTime: string; doses: typeof doses.value }[] =
+    [];
   for (const dose of doses.value) {
-    const hour = Number(dose.sortTime.slice(0, 2));
     const label =
       dose.schedule.period === 'as_needed'
         ? '按需用药'
-        : hour < 11
-          ? '早间'
-          : hour < 16
-            ? '午间'
-            : '晚间';
-    let group = result.find((item) => item.label === label);
+        : dose.schedule.period === 'morning'
+          ? '早餐'
+          : dose.schedule.period === 'noon'
+            ? '午餐'
+            : dose.schedule.period === 'evening'
+              ? '晚餐'
+              : dose.schedule.time!;
+    const key = `${label}-${dose.sortTime}`;
+    let group = result.find((item) => `${item.label}-${item.sortTime}` === key);
     if (!group) {
       group = {
         label,
-        icon: label === '早间' ? Sunrise : label === '午间' ? Sun : label === '晚间' ? Moon : Pill,
+        sortTime: dose.sortTime,
+        icon: label === '早餐' ? Sunrise : label === '午餐' ? Sun : label === '晚餐' ? Moon : Pill,
         doses: [],
       };
       result.push(group);
@@ -162,33 +166,23 @@ async function remove() {
         <section v-for="group in groups" :key="group.label" class="time-group">
           <div class="time-group-label">
             <component :is="group.icon" :size="20" />
-            <h2>{{ group.label }}</h2>
+            <h2>
+              {{ group.label }} <span class="badge neutral">{{ group.doses.length }}种药</span>
+            </h2>
           </div>
           <article
             v-for="dose in group.doses"
             :key="`${dose.medication.id}-${dose.schedule.id}`"
-            class="dose-row"
+            class="dose-row compact-dose-row"
           >
-            <div class="dose-time">
-              {{
-                dose.schedule.period === 'time'
-                  ? dose.schedule.time
-                  : labels.period[dose.schedule.period]
-              }}<span>{{ labels.meal[dose.schedule.meal] }}</span>
-            </div>
             <div class="dose-info">
               <h3>{{ dose.medication.name }}</h3>
               <p>
-                {{ dose.medication.specification || '规格未填写' }} ·
-                {{ dose.medication.route || '用法未填写' }}
+                每次 {{ dose.schedule.dose }} {{ dose.schedule.unit }} ·
+                {{ labels.meal[dose.schedule.meal] }}
               </p>
-              <p v-if="dose.medication.note" class="dose-note">{{ dose.medication.note }}</p>
             </div>
-            <div class="dose-amount">
-              <span>每次</span><strong>{{ dose.schedule.dose }}</strong
-              ><span>{{ dose.schedule.unit }}</span>
-            </div>
-            <button class="button secondary" @click="detail = dose.medication">查看用药详情</button>
+            <button class="text-button" @click="detail = dose.medication">查看用药详情</button>
           </article>
         </section>
       </div>

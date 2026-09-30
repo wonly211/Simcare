@@ -131,10 +131,11 @@ export interface TodayDose {
 export function todayMedication(medications: Medication[], date = beijingDate()): TodayDose[] {
   dateSchema.parse(date);
   const weekday = new Date(`${date}T12:00:00+08:00`).getUTCDay();
+  // Meal periods use reserved sort slots. Explicit times stay separate even when equal.
   const order = {
-    morning: '08:00',
-    noon: '12:00',
-    evening: '18:00',
+    morning: '07:01',
+    noon: '12:01',
+    evening: '18:01',
     time: '00:00',
     as_needed: '99:99',
   };
@@ -161,8 +162,73 @@ export function todayMedication(medications: Medication[], date = beijingDate())
     .sort(
       (left, right) =>
         left.sortTime.localeCompare(right.sortTime) ||
+        Number(right.schedule.period === 'time') - Number(left.schedule.period === 'time') ||
         left.medication.name.localeCompare(right.medication.name, 'zh-CN'),
     );
+}
+export interface HealthGroup {
+  id: string;
+  dateLabel: string;
+  timeLabel: string;
+  records: HealthRecord[];
+  average: {
+    systolic: number | null;
+    diastolic: number | null;
+    pulse: number | null;
+    oxygen: number | null;
+    temperature: number | null;
+  };
+}
+function roundedAverage(values: Array<number | null>, precision = 1): number | null {
+  const valid = values.filter((value): value is number => value !== null);
+  return valid.length
+    ? Math.round((valid.reduce((sum, value) => sum + value, 0) / valid.length) * precision) /
+        precision
+    : null;
+}
+export function groupHealthRecords(records: HealthRecord[]): HealthGroup[] {
+  const sorted = [...records].sort((left, right) =>
+    right.measuredAt.localeCompare(left.measuredAt),
+  );
+  const groups: HealthGroup[] = [];
+  for (const record of sorted) {
+    const date = record.measuredAt.slice(0, 10);
+    const start = groups.at(-1);
+    const startTime = start?.records[0]?.measuredAt;
+    const withinWindow =
+      !!start &&
+      start.dateLabel === date &&
+      startTime &&
+      Math.abs(Date.parse(startTime) - Date.parse(record.measuredAt)) <= 10 * 60 * 1000;
+    if (!withinWindow) {
+      groups.push({
+        id: record.id,
+        dateLabel: date,
+        timeLabel: record.measuredAt.slice(11, 16),
+        records: [record],
+        average: { systolic: null, diastolic: null, pulse: null, oxygen: null, temperature: null },
+      });
+      continue;
+    }
+    start.records.push(record);
+  }
+  return groups.map((group) => {
+    const times = group.records.map((record) => record.measuredAt).sort();
+    const first = times[0]!.slice(11, 16);
+    const last = times.at(-1)!.slice(11, 16);
+    group.timeLabel = first === last ? first : `${first}–${last}`;
+    group.average = {
+      systolic: roundedAverage(group.records.map((record) => record.systolic)),
+      diastolic: roundedAverage(group.records.map((record) => record.diastolic)),
+      pulse: roundedAverage(group.records.map((record) => record.pulse)),
+      oxygen: roundedAverage(group.records.map((record) => record.oxygen)),
+      temperature: roundedAverage(
+        group.records.map((record) => record.temperature),
+        10,
+      ),
+    };
+    return group;
+  });
 }
 export function canViewHealth(actor: Member, ownerId: string, grants: Grant[]): boolean {
   return (

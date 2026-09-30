@@ -2,6 +2,13 @@ import { spawnSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
+// Always exercise the current sources, never a leftover local build.
+const build = spawnSync(
+  process.execPath,
+  [resolve('node_modules/vite/bin/vite.js'), 'build', '--config', 'apps/web/vite.config.ts'],
+  { stdio: 'inherit' },
+);
+if (build.status !== 0) process.exit(build.status ?? 1);
 const cli = resolve('node_modules/wrangler/bin/wrangler.js');
 const storage = resolve('.artifacts', `e2e-${randomUUID()}`);
 const migration = spawnSync(

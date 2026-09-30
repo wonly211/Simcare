@@ -5,8 +5,7 @@ import { LineChart } from 'echarts/charts';
 import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
 import { CanvasRenderer } from 'echarts/renderers';
 import { textSize } from '../state/display';
-import { displayTime } from '../state/client';
-import type { HealthRecord } from '@simcare/shared';
+import { groupHealthRecords, type HealthRecord } from '@simcare/shared';
 echarts.use([LineChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
 const props = withDefaults(
   defineProps<{
@@ -19,9 +18,13 @@ const element = ref<HTMLElement>();
 let chart: echarts.ECharts | undefined;
 let observer: ResizeObserver | undefined;
 const sorted = computed(() =>
-  [...props.records]
-    .filter((record) => !record.deletedAt)
-    .sort((left, right) => left.measuredAt.localeCompare(right.measuredAt)),
+  groupHealthRecords(props.records.filter((record) => !record.deletedAt))
+    .reverse()
+    .map((group) => ({
+      id: group.id,
+      label: `${group.dateLabel} ${group.timeLabel}`,
+      ...group.average,
+    })),
 );
 const hasData = computed(() =>
   sorted.value.some((record) =>
@@ -57,9 +60,7 @@ function render() {
       },
       xAxis: {
         type: 'category',
-        data: sorted.value.map(
-          (record) => `${record.measuredAt.slice(5, 10)} ${record.measuredAt.slice(11, 16)}`,
-        ),
+        data: sorted.value.map((record) => record.label.slice(5)),
         axisLine: { lineStyle: { color: '#dde4df' } },
         axisTick: { show: false },
         axisLabel: {
@@ -122,7 +123,7 @@ onBeforeUnmount(() => {
     <div v-if="!hasData" class="chart-empty">暂无该指标的测量数据</div>
   </div>
   <details class="trend-data">
-    <summary>查看同范围测量数据</summary>
+    <summary>查看同范围平均数据</summary>
     <p>
       {{
         metric === 'pressure'
@@ -136,7 +137,7 @@ onBeforeUnmount(() => {
     </p>
     <ul>
       <li v-for="record in sorted" :key="record.id">
-        {{ displayTime(record.measuredAt) }}：{{
+        {{ record.label }}：{{
           metric === 'pressure'
             ? record.systolic === null
               ? '未测量'

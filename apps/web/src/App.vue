@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, ref, watch } from 'vue';
 import { RouterView, useRoute, useRouter } from 'vue-router';
 import {
+  Activity,
   AlertCircle,
   ArrowRight,
   Check,
@@ -230,7 +231,7 @@ onMounted(async () => {
             ><button class="button secondary" @click="navigate('settings')">前往设置密码</button>
           </div>
           <div v-if="['overview', 'health', 'medication'].includes(page)" class="member-switch">
-            <span class="member-context">当前查看</span>
+            <span class="member-context">正在查看</span>
             <span class="avatar small">{{
               members.find((member) => member.id === selectedMember)?.nickname.slice(0, 1) ?? '我'
             }}</span
@@ -242,8 +243,8 @@ onMounted(async () => {
               aria-label="切换家庭成员"
               @click="memberPickerOpen = true"
             >
-              切换</button
-            ><span class="member-switch-label">这里显示当前成员的健康资料</span>
+              切换
+            </button>
           </div>
           <div v-if="!state.online || state.pendingCount" class="inline-banner" role="status">
             <span>{{

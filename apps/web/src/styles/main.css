@@ -2055,3 +2055,109 @@ a:focus-visible {
   padding: 1rem;
   font-size: 1.2rem;
 }
+
+/* Elder-friendly information hierarchy */
+.health-group {
+  display: grid;
+  gap: 8px;
+}
+.health-group-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+  color: var(--muted);
+}
+.health-group-heading strong {
+  color: #283935;
+}
+.grouped-record-row {
+  display: grid;
+  gap: 16px;
+}
+.health-group-details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.health-group-details summary {
+  cursor: pointer;
+  color: var(--green);
+  font-weight: 600;
+}
+.raw-health-row {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid #edf1ef;
+}
+.medicine-group-card {
+  display: grid;
+  gap: 12px;
+}
+.medicine-group-card h3 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.overview-dose-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid #edf1ef;
+}
+.overview-dose-row span {
+  color: var(--muted);
+}
+.compact-dose-row {
+  align-items: center;
+}
+.compact-dose-row .dose-info p {
+  color: var(--muted);
+}
+.member-switch {
+  gap: 10px;
+}
+.member-switch-label {
+  display: none;
+}
+@media (max-width: 700px) {
+  .raw-health-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .raw-health-row .text-button {
+    justify-self: start;
+  }
+}
+
+.health-group-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+/* Route changes focus the main landmark without drawing a page-sized frame. */
+.main-content:focus {
+  outline: none;
+}
+/* Keep dates intact while time ranges wrap below on narrow screens. */
+.health-group-heading {
+  flex-wrap: wrap;
+}
+.health-group-heading strong {
+  white-space: nowrap;
+}
+@media (max-width: 700px) {
+  .member-switch .member-context,
+  .member-switch .avatar {
+    display: none;
+  }
+  .member-switch .selected-member-name {
+    flex: 1 1 120px;
+  }
+}
